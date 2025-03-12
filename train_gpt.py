@@ -265,6 +265,35 @@ class Block(nn.Module):
         # MLP branch
         x = x + self.mlp(norm(x))  # RMSNorm + MLP
         return x
+
+def fast_conv(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    len1, _ = a.shape
+    _, len2, _ = b.shape
+    T = 2**int(np.ceil(np.log2(len1 + len2 - 1)))
+    A = torch.fft.fft(a, n=T, dim=0)
+    B = torch.fft.fft(b, n=T, dim=1)
+    C = A * B
+    c = torch.fft.ifft(C, n=T, dim=1)
+    return c[..., :(len1 + len2 - 1), :]
+
+class CustomComplexSSM(nn.Module):
+    def __init__(self, input_size: int, state_size: int, output_size: int):
+        super().__init__()
+        self.A = nn.Parameter(0.999 * torch.exp(torch.randn(state_size) * 1j))
+        self.B = nn.Parameter(torch.randn(input_size, state_size, dtype=torch.complex64)/np.sqrt(state_size))
+        self.C = nn.Parameter(torch.randn(state_size, output_size, dtype=torch.complex64)/np.sqrt(state_size))
+        self.D = nn.Parameter(torch.randn(output_size))
+        self.norm = RMSNorm(input_size)
+        
+    def forward(self, u: torch.Tensor):
+        u = self.norm(u)
+        batch_size, seq_len, _ = u.shape
+        A_powers = torch.pow(self.A, torch.arange(seq_len, device=u.device)[:, None])
+        uB = torch.einsum('bli,iz->blz', u.to(torch.complex64), self.B)
+        x = fast_conv(A_powers, uB)[:, :seq_len]
+        y = torch.real(torch.einsum('blz,zo->blo', x, self.C)) + self.D
+        return y, x[:, -1]
+
 # -----------------------------------------------------------------------------
 # The main model
 
